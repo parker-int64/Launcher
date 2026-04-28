@@ -1,5 +1,9 @@
 #pragma once
 #include "ui_app_page.hpp"
+#include "TinyGPS++.h"
+#include <fcntl.h>
+#include <termios.h>
+#include <unistd.h>
 #include <cmath>
 #include <cstdint>
 #include <random>
@@ -9,7 +13,11 @@
 
 class UIHikePodPage : public app_base
 {
-    enum class ViewMode { NAV, GPS_INFO };
+    enum class ViewMode
+    {
+        NAV,
+        GPS_INFO
+    };
 
     struct RoutePoint
     {
@@ -37,6 +45,7 @@ class UIHikePodPage : public app_base
 public:
     UIHikePodPage() : app_base()
     {
+        init_gps_serial();
         init_mock_data();
         creat_UI();
         event_handler_init();
@@ -45,9 +54,14 @@ public:
 
     ~UIHikePodPage()
     {
-        if (tick_timer_) {
+        if (tick_timer_)
+        {
             lv_timer_del(tick_timer_);
             tick_timer_ = nullptr;
+        }
+        if (gps_fd_ != -1)
+        {
+            close(gps_fd_);
         }
     }
 
@@ -55,6 +69,10 @@ private:
     std::unordered_map<std::string, lv_obj_t *> ui_obj_;
     lv_timer_t *tick_timer_ = nullptr;
     ViewMode view_mode_ = ViewMode::NAV;
+
+    TinyGPSPlus gps_;
+    int gps_fd_ = -1;
+    std::string nmea_line_buffer_;
 
     std::vector<RoutePoint> route_points_;
     std::vector<lv_point_precise_t> route_line_points_;
@@ -71,6 +89,38 @@ private:
     int battery_level_ = 86;
     int zoom_level_ = 7;
     bool gps_fixed_ = true;
+    // NMEA sentence presence flags (if sentence has appeared on the raw stream)
+    bool seen_gga_ = false;
+    bool seen_rmc_ = false;
+    bool seen_vtg_ = false;
+    bool seen_zda_ = false;
+    bool seen_gsv_ = false;
+    bool seen_gll_ = false;
+    bool seen_txt_ = false;
+    bool seen_gsa_ = false;
+
+    void init_gps_serial()
+    {
+        gps_fd_ = open("/dev/ttyS0", O_RDWR | O_NOCTTY | O_NDELAY);
+        if (gps_fd_ == -1)
+            return;
+
+        struct termios options;
+        tcgetattr(gps_fd_, &options);
+        cfsetispeed(&options, B115200);
+        cfsetospeed(&options, B115200);
+        options.c_cflag |= (CLOCAL | CREAD);
+        options.c_cflag &= ~PARENB;
+        options.c_cflag &= ~CSTOPB;
+        options.c_cflag &= ~CSIZE;
+        options.c_cflag |= CS8;
+        options.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
+        options.c_iflag &= ~(IXON | IXOFF | IXANY);
+        options.c_oflag &= ~OPOST;
+        tcsetattr(gps_fd_, TCSANOW, &options);
+        fcntl(gps_fd_, F_SETFL, FNDELAY);
+    }
+
     int current_route_idx_ = 3;
     int map_offset_x_ = 0;
     int map_offset_y_ = 0;
@@ -79,34 +129,36 @@ private:
 
     void init_mock_data()
     {
+        // Keep route/track simple but remove fake GPS/satellite data so UI reflects real parsed data
         route_points_ = {
-            {34, 106}, {54, 90}, {76, 78}, {98, 72}, {122, 60},
-            {148, 46}, {172, 40}, {196, 48}, {220, 62}, {246, 70}, {272, 64}
-        };
+            {34, 106}, {54, 90}, {76, 78}, {98, 72}, {122, 60}, {148, 46}, {172, 40}, {196, 48}, {220, 62}, {246, 70}, {272, 64}};
         route_line_points_.clear();
-        for (const auto &point : route_points_) {
+        for (const auto &point : route_points_)
+        {
             route_line_points_.push_back({(lv_value_precise_t)point.x, (lv_value_precise_t)point.y});
         }
 
-        track_points_ = {
-            {34, 106}, {48, 94}, {66, 82}, {85, 76}
-        };
+        track_points_ = { {34, 106}, {48, 94}, {66, 82}, {85, 76} };
         rebuild_track_points();
 
-        satellites_ = {
-            {"GPS", 12, 69, 18, 37, true,  true},
-            {"GPS", 18, 54, 72, 31, true,  true},
-            {"GLN",  6, 33, 145, 26, false, true},
-            {"GAL", 11, 48, 224, 29, true,  true},
-            {"BDS", 22, 22, 305, 18, false, true},
-            {"GPS",  3, 12, 268,  0, false, false}
-        };
+        // Clear any mocked satellite list so we draw based on real data when available
+        satellites_.clear();
+
+        // Start with no fix until parser provides real data
+        gps_fixed_ = false;
+        current_lat_ = 0.0f;
+        current_lng_ = 0.0f;
+        current_alt_ = 0.0f;
+        current_speed_ = 0.0f;
+        current_course_ = 0.0f;
+        current_hdop_ = 99.0f;
     }
 
     void rebuild_track_points()
     {
         track_line_points_.clear();
-        for (const auto &point : track_points_) {
+        for (const auto &point : track_points_)
+        {
             track_line_points_.push_back({(lv_value_precise_t)point.x, (lv_value_precise_t)point.y});
         }
     }
@@ -214,7 +266,8 @@ private:
         lv_obj_clear_flag(right_panel, LV_OBJ_FLAG_SCROLLABLE);
 
         const char *card_titles[3] = {"GPS", "Zoom", "Track"};
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 3; ++i)
+        {
             lv_obj_t *card = lv_obj_create(right_panel);
             lv_obj_set_size(card, 72, 28);
             lv_obj_set_pos(card, 1, 2 + i * 34);
@@ -256,7 +309,7 @@ private:
         lv_obj_set_style_text_font(footer_label, &lv_font_montserrat_10, LV_PART_MAIN | LV_STATE_DEFAULT);
 
         lv_obj_t *gps = lv_obj_create(bg);
-        lv_obj_set_size(gps, 320, 130);
+        lv_obj_set_size(gps, 320, 140);
         lv_obj_set_pos(gps, 0, 20);
         lv_obj_set_style_radius(gps, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_bg_color(gps, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -300,9 +353,10 @@ private:
 
         const char *c1labels[8] = {"Lat", "Lng", "Alt", "Spd", "Crs", "Date", "Time", "HDOP"};
         const char *c2labels[8] = {"Seen", "Visb", "Used", "InFx", "GPS", "Gln", "Gal", "BDo"};
-        for (int i = 0; i < 8; ++i) {
+        for (int i = 0; i < 8; ++i)
+        {
             lv_obj_t *box = lv_obj_create(gps);
-            lv_obj_set_size(box, 90, 13);
+            lv_obj_set_size(box, 100, 13);
             lv_obj_set_pos(box, 1, 26 + i * 12);
             lv_obj_set_style_radius(box, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_set_style_bg_color(box, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -319,10 +373,11 @@ private:
             lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, LV_PART_MAIN | LV_STATE_DEFAULT);
             ui_obj_[std::string("gps_col1_") + std::to_string(i)] = lbl;
         }
-        for (int i = 0; i < 8; ++i) {
+        for (int i = 0; i < 8; ++i)
+        {
             lv_obj_t *box = lv_obj_create(gps);
-            lv_obj_set_size(box, 53, 13);
-            lv_obj_set_pos(box, 90, 26 + i * 12);
+            lv_obj_set_size(box, 80, 13);
+            lv_obj_set_pos(box, 102, 26 + i * 12);
             lv_obj_set_style_radius(box, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_set_style_bg_color(box, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_set_style_bg_opa(box, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -341,7 +396,7 @@ private:
 
         lv_obj_t *sky = lv_obj_create(gps);
         lv_obj_set_size(sky, 96, 96);
-        lv_obj_set_pos(sky, 143, 27);
+        lv_obj_set_pos(sky, 220, 27);
         lv_obj_set_style_radius(sky, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_bg_color(sky, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_bg_opa(sky, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -353,7 +408,7 @@ private:
 
         lv_obj_t *status = lv_obj_create(gps);
         lv_obj_set_size(status, 318, 13);
-        lv_obj_set_pos(status, 1, 122);
+        lv_obj_set_pos(status, 1, 126);
         lv_obj_set_style_radius(status, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_bg_color(status, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_bg_opa(status, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -378,10 +433,13 @@ private:
     {
         lv_obj_t *nav = ui_obj_["nav_view"];
         lv_obj_t *gps = ui_obj_["gps_view"];
-        if (view_mode_ == ViewMode::NAV) {
+        if (view_mode_ == ViewMode::NAV)
+        {
             lv_obj_clear_flag(nav, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(gps, LV_OBJ_FLAG_HIDDEN);
-        } else {
+        }
+        else
+        {
             lv_obj_add_flag(nav, LV_OBJ_FLAG_HIDDEN);
             lv_obj_clear_flag(gps, LV_OBJ_FLAG_HIDDEN);
         }
@@ -395,38 +453,54 @@ private:
     static void static_lvgl_handler(lv_event_t *e)
     {
         auto *self = static_cast<UIHikePodPage *>(lv_event_get_user_data(e));
-        if (self) {
+        if (self)
+        {
             self->event_handler(e);
         }
     }
 
     void event_handler(lv_event_t *e)
     {
-        if (!IS_KEY_PRESSED(e) && !IS_KEY_RELEASED(e)) {
+        if (!IS_KEY_PRESSED(e) && !IS_KEY_RELEASED(e))
+        {
             return;
         }
 
         uint32_t key = LV_EVENT_KEYBOARD_GET_KEY(e);
-        if (key == KEY_ESC && IS_KEY_RELEASED(e)) {
-            if (go_back_home) {
+        if (key == KEY_ESC && IS_KEY_RELEASED(e))
+        {
+            if (go_back_home)
+            {
                 go_back_home();
             }
             return;
         }
 
-        if (key == KEY_SWITCH_VIEW && IS_KEY_RELEASED(e)) {
+        if (key == KEY_SWITCH_VIEW && IS_KEY_RELEASED(e))
+        {
             view_mode_ = (view_mode_ == ViewMode::NAV) ? ViewMode::GPS_INFO : ViewMode::NAV;
             update_visibility();
             return;
         }
 
-        if (view_mode_ == ViewMode::NAV && IS_KEY_RELEASED(e)) {
-            switch (key) {
-            case KEY_LEFT_CODE: map_offset_x_ = std::max(map_offset_x_ - 4, -20); break;
-            case KEY_RIGHT_CODE: map_offset_x_ = std::min(map_offset_x_ + 4, 20); break;
-            case KEY_UP_CODE: map_offset_y_ = std::max(map_offset_y_ - 4, -16); break;
-            case KEY_DOWN_CODE: map_offset_y_ = std::min(map_offset_y_ + 4, 16); break;
-            default: break;
+        if (view_mode_ == ViewMode::NAV && IS_KEY_RELEASED(e))
+        {
+            switch (key)
+            {
+            case KEY_LEFT_CODE:
+                map_offset_x_ = std::max(map_offset_x_ - 4, -20);
+                break;
+            case KEY_RIGHT_CODE:
+                map_offset_x_ = std::min(map_offset_x_ + 4, 20);
+                break;
+            case KEY_UP_CODE:
+                map_offset_y_ = std::max(map_offset_y_ - 4, -16);
+                break;
+            case KEY_DOWN_CODE:
+                map_offset_y_ = std::min(map_offset_y_ + 4, 16);
+                break;
+            default:
+                break;
             }
             sync_nav_view();
         }
@@ -435,7 +509,8 @@ private:
     static void static_tick_cb(lv_timer_t *t)
     {
         auto *self = static_cast<UIHikePodPage *>(lv_timer_get_user_data(t));
-        if (self) {
+        if (self)
+        {
             self->tick();
         }
     }
@@ -443,15 +518,100 @@ private:
     void tick()
     {
         ++tick_count_;
-        if (current_route_idx_ < (int)route_points_.size() - 1 && (tick_count_ % 3) == 0) {
+
+        // Read real GPS data from /dev/ttyS0
+        if (gps_fd_ != -1)
+        {
+            char buffer[256];
+            ssize_t bytes_read = read(gps_fd_, buffer, sizeof(buffer));
+            if (bytes_read > 0)
+            {
+                for (int i = 0; i < bytes_read; ++i)
+                {
+                    char c = buffer[i];
+                    // Feed TinyGPS++ parser as before
+                    gps_.encode(c);
+
+                    // Accumulate into a line buffer and process complete NMEA lines
+                    nmea_line_buffer_.push_back(c);
+                    if (c == '\n')
+                    {
+                        // extract line and trim CR/LF
+                        std::string line = nmea_line_buffer_;
+                        nmea_line_buffer_.clear();
+                        while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
+                            line.pop_back();
+
+                        // Detect antenna open message
+                        if (line.find("ANTENNA OPEN") != std::string::npos)
+                        {
+                            gps_fixed_ = false;
+                            current_hdop_ = 25.5f;
+                            // mark satellites as not visible/used
+                            for (auto &sat : satellites_)
+                            {
+                                sat.visible = false;
+                                sat.used = false;
+                                sat.snr = 0;
+                            }
+                        }
+
+                        // Detect GNGGA no-fix pattern: contains ",,0,00,"
+                        if (line.rfind("$GNGGA", 0) == 0)
+                        {
+                            if (line.find(",,0,00,") != std::string::npos)
+                            {
+                                gps_fixed_ = false;
+                                current_hdop_ = 25.5f;
+                                for (auto &sat : satellites_)
+                                {
+                                    sat.visible = false;
+                                    sat.used = false;
+                                    sat.snr = 0;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // After processing raw lines, update TinyGPS++ derived values if available
+                if (gps_.location.isUpdated())
+                {
+                    current_lat_ = (float)gps_.location.lat();
+                    current_lng_ = (float)gps_.location.lng();
+                    gps_fixed_ = gps_.location.isValid();
+                }
+                if (gps_.altitude.isUpdated())
+                {
+                    current_alt_ = (float)gps_.altitude.meters();
+                }
+                if (gps_.speed.isUpdated())
+                {
+                    current_speed_ = (float)gps_.speed.kmph();
+                }
+                if (gps_.course.isUpdated())
+                {
+                    current_course_ = (float)gps_.course.deg();
+                }
+                if (gps_.hdop.isUpdated())
+                {
+                    current_hdop_ = (float)gps_.hdop.hdop();
+                }
+            }
+        }
+
+        if (current_route_idx_ < (int)route_points_.size() - 1 && (tick_count_ % 3) == 0)
+        {
             ++current_route_idx_;
             track_points_.push_back(route_points_[current_route_idx_]);
-            if ((int)track_points_.size() > 9) {
+            if ((int)track_points_.size() > 9)
+            {
                 track_points_.erase(track_points_.begin());
             }
             rebuild_track_points();
         }
-        if (current_route_idx_ >= (int)route_points_.size() - 1 && (tick_count_ % 16) == 0) {
+        if (current_route_idx_ >= (int)route_points_.size() - 1 && (tick_count_ % 16) == 0)
+        {
             current_route_idx_ = 3;
             track_points_.clear();
             track_points_.push_back(route_points_[0]);
@@ -461,45 +621,32 @@ private:
             rebuild_track_points();
         }
 
-        const RoutePoint &current = route_points_[current_route_idx_];
-        int lat_delta = (int)(rng_() % 3) - 1;
-        int lng_delta = (int)(rng_() % 3) - 1;
-        int alt_delta = (int)(rng_() % 5) - 2;
-        int speed_delta = (int)(rng_() % 5) - 2;
-        int course_delta = (int)(rng_() % 7) - 3;
-        int hdop_delta = (int)(rng_() % 5) - 2;
-
-        current_lat_ += 0.00001f * lat_delta;
-        current_lng_ += 0.00001f * lng_delta;
-        current_alt_ = std::max(120.0f, std::min(156.0f, current_alt_ + alt_delta * 0.4f));
-        current_speed_ = std::max(2.4f, std::min(5.6f, current_speed_ + speed_delta * 0.12f));
-        current_course_ += course_delta * 2.0f;
-        if (current_course_ < 0.0f) current_course_ += 360.0f;
-        if (current_course_ >= 360.0f) current_course_ -= 360.0f;
-        current_hdop_ = std::max(0.8f, std::min(2.3f, current_hdop_ + hdop_delta * 0.04f));
-        if ((tick_count_ % 20) == 0 && battery_level_ > 48) {
+        if ((tick_count_ % 20) == 0 && battery_level_ > 48)
+        {
             --battery_level_;
         }
         zoom_level_ = 7 + ((tick_count_ / 12) % 2);
 
-        for (auto &sat : satellites_) {
+        for (auto &sat : satellites_)
+        {
             int snr_delta = (int)(rng_() % 5) - 2;
             sat.snr = std::max(0, std::min(42, sat.snr + snr_delta));
             sat.visible = (sat.snr > 0);
             sat.used = sat.visible && sat.snr >= 25;
         }
 
-        (void)current;
         sync_nav_view();
         sync_gps_view();
     }
 
     void sync_nav_view()
     {
-        if (route_line_points_.size() >= 2) {
+        if (route_line_points_.size() >= 2)
+        {
             lv_line_set_points(ui_obj_["route_line"], route_line_points_.data(), (uint16_t)route_line_points_.size());
         }
-        if (track_line_points_.size() >= 2) {
+        if (track_line_points_.size() >= 2)
+        {
             lv_line_set_points(ui_obj_["track_line"], track_line_points_.data(), (uint16_t)track_line_points_.size());
         }
 
@@ -526,39 +673,75 @@ private:
 
         const char *values1[8] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
         char storage1[8][32];
-        lv_snprintf(storage1[0], sizeof(storage1[0]), "%.5f", (double)current_lat_);
-        lv_snprintf(storage1[1], sizeof(storage1[1]), "%.5f", (double)current_lng_);
-        lv_snprintf(storage1[2], sizeof(storage1[2]), "%.1fm", (double)current_alt_);
-        lv_snprintf(storage1[3], sizeof(storage1[3]), "%.1fkm", (double)current_speed_);
-        lv_snprintf(storage1[4], sizeof(storage1[4]), "%.0f", (double)current_course_);
-        lv_snprintf(storage1[5], sizeof(storage1[5]), "27/04/26");
-        lv_snprintf(storage1[6], sizeof(storage1[6]), "19:45:2%d", tick_count_ % 10);
-        lv_snprintf(storage1[7], sizeof(storage1[7]), "%.1f", (double)current_hdop_);
-        for (int i = 0; i < 8; ++i) {
+        // Use parsed TinyGPS++ values when available, otherwise show placeholders
+        if (gps_.location.isValid())
+        {
+            lv_snprintf(storage1[0], sizeof(storage1[0]), "%.5f", (double)gps_.location.lat());
+            lv_snprintf(storage1[1], sizeof(storage1[1]), "%.5f", (double)gps_.location.lng());
+        }
+        else
+        {
+            lv_snprintf(storage1[0], sizeof(storage1[0]), "--");
+            lv_snprintf(storage1[1], sizeof(storage1[1]), "--");
+        }
+
+        if (gps_.altitude.isValid())
+            lv_snprintf(storage1[2], sizeof(storage1[2]), "%.1fm", (double)gps_.altitude.meters());
+        else
+            lv_snprintf(storage1[2], sizeof(storage1[2]), "--");
+
+        if (gps_.speed.isValid())
+            lv_snprintf(storage1[3], sizeof(storage1[3]), "%.1fkm", (double)gps_.speed.kmph());
+        else
+            lv_snprintf(storage1[3], sizeof(storage1[3]), "--");
+
+        if (gps_.course.isValid())
+            lv_snprintf(storage1[4], sizeof(storage1[4]), "%.0f", (double)gps_.course.deg());
+        else
+            lv_snprintf(storage1[4], sizeof(storage1[4]), "--");
+
+        if (gps_.date.isValid())
+            lv_snprintf(storage1[5], sizeof(storage1[5]), "%02u/%02u/%02u", (unsigned)gps_.date.day(), (unsigned)gps_.date.month(), (unsigned)(gps_.date.year() % 100));
+        else
+            lv_snprintf(storage1[5], sizeof(storage1[5]), "--");
+
+        if (gps_.time.isValid())
+            lv_snprintf(storage1[6], sizeof(storage1[6]), "%02u:%02u:%02u", (unsigned)gps_.time.hour(), (unsigned)gps_.time.minute(), (unsigned)gps_.time.second());
+        else
+            lv_snprintf(storage1[6], sizeof(storage1[6]), "--");
+
+        if (gps_.hdop.isValid())
+            lv_snprintf(storage1[7], sizeof(storage1[7]), "%.1f", (double)gps_.hdop.hdop());
+        else
+            lv_snprintf(storage1[7], sizeof(storage1[7]), "--");
+        for (int i = 0; i < 8; ++i)
+        {
             lv_snprintf(buf, sizeof(buf), "%s: %s", c1labels[i], storage1[i]);
             lv_label_set_text(ui_obj_[std::string("gps_col1_") + std::to_string(i)], buf);
         }
 
-        int visible = 0;
-        int used = 0;
-        int gps = 0;
-        int gln = 0;
-        int gal = 0;
-        int bdo = 0;
-        for (const auto &sat : satellites_) {
-            if (sat.visible) ++visible;
-            if (sat.used) ++used;
-            if (sat.visible && sat.system[0] == 'G' && sat.system[1] == 'P') ++gps;
-            if (sat.visible && sat.system[0] == 'G' && sat.system[1] == 'L') ++gln;
-            if (sat.visible && sat.system[0] == 'G' && sat.system[1] == 'A') ++gal;
-            if (sat.visible && sat.system[0] == 'B') ++bdo;
+        // Use TinyGPS++ parsed satellite counts where possible
+        int total_seen = 0;
+        int total_used = 0;
+        int gps_sys = 0;
+        int gln_sys = 0;
+        int gal_sys = 0;
+        int bdo_sys = 0;
+
+        // TinyGPSPlus exposes a satellites member (number of satellites). Use that as seen/used proxy.
+        if (gps_.satellites.isValid())
+        {
+            total_seen = gps_.satellites.value();
+            // When we have a fix, assume these are used; otherwise none used
+            total_used = gps_fixed_ ? total_seen : 0;
         }
-        int vals2[8] = {(int)satellites_.size(), visible, used, 4, gps, gln, gal, bdo};
-        for (int i = 0; i < 8; ++i) {
+
+        int vals2[8] = { total_seen, total_seen, total_used, gps_fixed_ ? 1 : 0, gps_sys, gln_sys, gal_sys, bdo_sys };
+        for (int i = 0; i < 8; ++i)
+        {
             lv_snprintf(buf, sizeof(buf), "%s: %d", c2labels[i], vals2[i]);
             lv_label_set_text(ui_obj_[std::string("gps_col2_") + std::to_string(i)], buf);
         }
-
         lv_snprintf(buf, sizeof(buf), "GP:%s Rx:15 Tx:13 Bd:115200", gps_fixed_ ? "On" : "Err");
         lv_label_set_text(ui_obj_["gps_status"], buf);
 
@@ -615,7 +798,8 @@ private:
         const int cx = 47;
         const int cy = 47;
         const int pos[4][2] = {{44, 4}, {84, 43}, {44, 84}, {4, 43}};
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 4; ++i)
+        {
             lv_obj_t *lbl = lv_label_create(sky);
             lv_label_set_text(lbl, cardinals[i]);
             lv_obj_set_pos(lbl, pos[i][0], pos[i][1]);
@@ -623,22 +807,7 @@ private:
             lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, LV_PART_MAIN | LV_STATE_DEFAULT);
         }
 
-        for (const auto &sat : satellites_) {
-            if (!sat.visible) {
-                continue;
-            }
-            float rad = (90.0f - sat.elevation) / 90.0f * 45.0f;
-            float az = sat.azimuth * 3.1415926f / 180.0f;
-            int sx = cx + (int)(std::sin(az) * rad);
-            int sy = cy - (int)(std::cos(az) * rad);
-            lv_obj_t *dot = lv_obj_create(sky);
-            lv_obj_set_size(dot, 4, 4);
-            lv_obj_set_pos(dot, sx, sy);
-            lv_obj_set_style_radius(dot, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
-            lv_color_t clr = sat.used ? lv_color_hex(0x00FF00) : lv_color_hex(0xFFFF00);
-            lv_obj_set_style_bg_color(dot, clr, LV_PART_MAIN | LV_STATE_DEFAULT);
-            lv_obj_set_style_border_width(dot, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-            lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
-        }
+        // Note: detailed satellite az/el info is not available via TinyGPS++ here,
+        // so we do not render individual satellite dots unless satellites_ is populated elsewhere.
     }
 };

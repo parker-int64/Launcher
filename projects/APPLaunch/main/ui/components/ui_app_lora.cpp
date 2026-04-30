@@ -135,6 +135,7 @@ static uint64_t g_lora_sent_popup_until_ms = 0;
 static char g_lora_last_rx[128] = {0};
 static char g_lora_last_tx[128] = "Hello from M5 LoRa-1262";
 static char g_lora_tx_input[128] = "";
+static bool g_lora_has_sent_message = false;
 static float g_lora_last_rssi = 0.0f;
 static float g_lora_last_snr = 0.0f;
 static const char *g_lora_cfg_freq = "869.525024MHz";
@@ -195,6 +196,10 @@ static lv_obj_t *g_info_mode = NULL;
 static lv_obj_t *g_info_status = NULL;
 static lv_obj_t *g_info_hint = NULL;
 static lv_timer_t *g_lora_timer = NULL;
+static lv_obj_t *g_rx_bubble_bg = NULL;
+static lv_obj_t *g_rx_bubble_lbl = NULL;
+static lv_obj_t *g_tx_bubble_bg = NULL;
+static lv_obj_t *g_tx_bubble_lbl = NULL;
 
 // 前向声明
 static uint64_t get_monotonic_ms(void);
@@ -1012,6 +1017,7 @@ static bool lora_send_text_packet(const char *payload)
     if (payload == NULL || payload[0] == '\0') return false;
     if (g_lora_tx_in_progress) return false;
     snprintf(g_lora_last_tx, sizeof(g_lora_last_tx), "%s", payload);
+    g_lora_has_sent_message = true;
     g_lora_tx_done = false;
     g_lora_rx_done = false;
     g_lora_pending_rx_after_tx = true;
@@ -1036,6 +1042,7 @@ static void lora_send_demo_packet(void)
     if (!g_lora_initialized || g_lora_radio == NULL) return;
     if (!g_lora_tx_mode) return;
     snprintf(g_lora_last_tx, sizeof(g_lora_last_tx), "Hello from M5 LoRa-1262 #%lu", (unsigned long)g_lora_tx_counter);
+    g_lora_has_sent_message = true;
     g_lora_pending_rx_after_tx = false;
     g_lora_tx_done = false;
     g_lora_rx_done = false;
@@ -1372,6 +1379,8 @@ static void lora_ui_clear(void)
     if (g_info_mode) lv_obj_add_flag(g_info_mode, LV_OBJ_FLAG_HIDDEN);
     if (g_info_status) lv_obj_add_flag(g_info_status, LV_OBJ_FLAG_HIDDEN);
     if (g_info_hint) lv_obj_add_flag(g_info_hint, LV_OBJ_FLAG_HIDDEN);
+    if (g_rx_bubble_bg) lv_obj_add_flag(g_rx_bubble_bg, LV_OBJ_FLAG_HIDDEN);
+    if (g_tx_bubble_bg) lv_obj_add_flag(g_tx_bubble_bg, LV_OBJ_FLAG_HIDDEN);
 }
 
 static lv_obj_t* lora_make_label(lv_obj_t *parent, const char *text, lv_coord_t x, lv_coord_t y, lv_coord_t w, lv_coord_t h,
@@ -1388,6 +1397,40 @@ static lv_obj_t* lora_make_label(lv_obj_t *parent, const char *text, lv_coord_t 
     lv_obj_set_style_bg_opa(lbl, LV_OPA_TRANSP, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_pad_all(lbl, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_align(lbl, align, LV_PART_MAIN | LV_STATE_DEFAULT);
+    return lbl;
+}
+
+static lv_obj_t* lora_make_bubble(lv_obj_t *parent, lv_coord_t x, lv_coord_t y, lv_coord_t w, lv_coord_t h, lv_color_t bg_color)
+{
+    lv_obj_t *bg = lv_obj_create(parent);
+    lv_obj_set_pos(bg, x, y);
+    lv_obj_set_size(bg, w, h);
+    lv_obj_set_style_bg_color(bg, bg_color, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(bg, 10, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(bg, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_left(bg, 8, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_right(bg, 8, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_top(bg, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_bottom(bg, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_shadow_width(bg, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_shadow_color(bg, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_shadow_opa(bg, LV_OPA_20, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_shadow_spread(bg, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_shadow_ofs_x(bg, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_shadow_ofs_y(bg, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_clear_flag(bg, LV_OBJ_FLAG_SCROLLABLE);
+    return bg;
+}
+
+static lv_obj_t* lora_make_bubble_label(lv_obj_t *parent, lv_coord_t max_w)
+{
+    lv_obj_t *lbl = lv_label_create(parent);
+    lv_obj_set_width(lbl, max_w);
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(lbl, LV_OPA_TRANSP, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_all(lbl, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     return lbl;
 }
 
@@ -1440,16 +1483,38 @@ static void lora_render_messages_view(void)
         lv_obj_clear_flag(g_title_label, LV_OBJ_FLAG_HIDDEN);
         lv_label_set_text(g_title_label, "Messages");
     }
-    if (g_content_label) {
-        lv_obj_clear_flag(g_content_label, LV_OBJ_FLAG_HIDDEN);
-        char text[192];
-        snprintf(text, sizeof(text), "%s",
-                 g_lora_last_rx[0] ? g_lora_last_rx : "No messages");
-        lv_label_set_text(g_content_label, text);
-        lv_obj_set_style_text_font(g_content_label, &lv_font_montserrat_16, LV_PART_MAIN | LV_STATE_DEFAULT);
-        lv_obj_set_style_text_color(g_content_label, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
-        lv_obj_set_style_text_align(g_content_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    // 接收消息气泡（左侧，蓝色）
+    if (g_rx_bubble_bg && g_rx_bubble_lbl) {
+        lv_obj_clear_flag(g_rx_bubble_bg, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(g_rx_bubble_lbl, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_pos(g_rx_bubble_bg, 4, 20);
+        lv_obj_set_size(g_rx_bubble_bg, 250, 44);
+        lv_obj_set_width(g_rx_bubble_lbl, 234);
+        if (g_lora_last_rx[0]) {
+            lv_label_set_text(g_rx_bubble_lbl, g_lora_last_rx);
+            lv_obj_set_style_text_color(g_rx_bubble_lbl, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+        } else {
+            lv_label_set_text(g_rx_bubble_lbl, "Waiting for message...");
+            lv_obj_set_style_text_color(g_rx_bubble_lbl, lv_color_hex(0xAACCFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+        }
     }
+
+    // 发送消息气泡（右侧，绿色）
+    if (g_tx_bubble_bg && g_tx_bubble_lbl) {
+        if (g_lora_has_sent_message) {
+            lv_obj_clear_flag(g_tx_bubble_bg, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(g_tx_bubble_lbl, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_pos(g_tx_bubble_bg, 66, 68);
+            lv_obj_set_size(g_tx_bubble_bg, 250, 44);
+            lv_obj_set_width(g_tx_bubble_lbl, 234);
+            lv_label_set_text(g_tx_bubble_lbl, g_lora_last_tx[0] ? g_lora_last_tx : "");
+        } else {
+            lv_obj_add_flag(g_tx_bubble_bg, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(g_tx_bubble_lbl, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
     if (g_info_status) {
         lv_obj_clear_flag(g_info_status, LV_OBJ_FLAG_HIDDEN);
         char text[256];
@@ -1530,12 +1595,14 @@ static void lora_render_sent_popup(void)
         lv_obj_clear_flag(g_title_label, LV_OBJ_FLAG_HIDDEN);
         lv_label_set_text(g_title_label, "Received");
     }
-    if (g_content_label) {
-        lv_obj_clear_flag(g_content_label, LV_OBJ_FLAG_HIDDEN);
-        lv_label_set_text(g_content_label, g_lora_last_rx[0] ? g_lora_last_rx : "<empty>");
-        lv_obj_set_style_text_font(g_content_label, &lv_font_montserrat_14, LV_PART_MAIN | LV_STATE_DEFAULT);
-        lv_obj_set_style_text_color(g_content_label, lv_color_hex(0x00D26A), LV_PART_MAIN | LV_STATE_DEFAULT);
-        lv_obj_set_style_text_align(g_content_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN | LV_STATE_DEFAULT);
+    if (g_rx_bubble_bg && g_rx_bubble_lbl) {
+        lv_obj_clear_flag(g_rx_bubble_bg, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(g_rx_bubble_lbl, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_pos(g_rx_bubble_bg, 4, 22);
+        lv_obj_set_size(g_rx_bubble_bg, 312, 86);
+        lv_obj_set_width(g_rx_bubble_lbl, 296);
+        lv_label_set_text(g_rx_bubble_lbl, g_lora_last_rx[0] ? g_lora_last_rx : "<empty>");
+        lv_obj_set_style_text_color(g_rx_bubble_lbl, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
     }
     if (g_info_status) {
         lv_obj_clear_flag(g_info_status, LV_OBJ_FLAG_HIDDEN);
@@ -1763,6 +1830,15 @@ void ui_app_lora_create(lv_obj_t* parent, lv_obj_t* root)
     g_info_hint = lora_make_label(parent, "", 8, 132, 304, 14,
                                    &lv_font_montserrat_10, lv_color_hex(0x8AA8FF), LV_TEXT_ALIGN_LEFT);
 
+    // 聊天气泡（Messages 视图）
+    g_rx_bubble_bg = lora_make_bubble(parent, 4, 20, 250, 44, lv_color_hex(0x3A7DFF));
+    g_rx_bubble_lbl = lora_make_bubble_label(g_rx_bubble_bg, 234);
+    lv_obj_add_flag(g_rx_bubble_bg, LV_OBJ_FLAG_HIDDEN);
+
+    g_tx_bubble_bg = lora_make_bubble(parent, 66, 68, 250, 44, lv_color_hex(0x00A854));
+    g_tx_bubble_lbl = lora_make_bubble_label(g_tx_bubble_bg, 234);
+    lv_obj_add_flag(g_tx_bubble_bg, LV_OBJ_FLAG_HIDDEN);
+
     // 绑定键盘事件到 root
     lv_obj_add_event_cb(root, lora_key_event_cb, (lv_event_code_t)LV_EVENT_KEYBOARD, NULL);
 
@@ -1804,4 +1880,8 @@ void ui_app_lora_destroy(void)
     g_info_mode = NULL;
     g_info_status = NULL;
     g_info_hint = NULL;
+    g_rx_bubble_bg = NULL;
+    g_rx_bubble_lbl = NULL;
+    g_tx_bubble_bg = NULL;
+    g_tx_bubble_lbl = NULL;
 }
